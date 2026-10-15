@@ -96,7 +96,7 @@ export function useSaveLoan() {
     mutationFn: ({ id, input }: { id?: string; input: LoanInputRaw }) =>
       api<LoanDetail>(id ? `/loans/${id}` : "/loans", { method: id ? "PUT" : "POST", body: input }),
     onSuccess: (loan) => {
-      qc.setQueryData(keys.loan(loan.id), loan);
+      qc.setQueryData(keys.loan(loan.id), withLoanDefaults(loan));
       for (const k of loanDataKeys()) void qc.invalidateQueries({ queryKey: k });
     },
   });
@@ -108,7 +108,7 @@ function useLoanDetailMutation<TVars>(fn: (v: TVars) => Promise<LoanDetail>) {
   return useMutation({
     mutationFn: fn,
     onSuccess: (loan) => {
-      qc.setQueryData(keys.loan(loan.id), loan);
+      qc.setQueryData(keys.loan(loan.id), withLoanDefaults(loan));
       for (const k of loanDataKeys()) void qc.invalidateQueries({ queryKey: k });
       void qc.invalidateQueries({ queryKey: keys.notifications });
     },
