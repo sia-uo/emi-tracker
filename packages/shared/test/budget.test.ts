@@ -36,8 +36,8 @@ describe("summarizeBudget", () => {
       ],
     });
     expect(rows).toEqual([
-      { currency: "INR", income: 1_00_000_00, emis: 15_000_00, emisPaid: 10_000_00, emisOthers: 0, expenses: 2_124_17, outgo: 17_124_17, left: 82_875_83 },
-      { currency: "USD", income: null, emis: 50_00, emisPaid: 0, emisOthers: 0, expenses: 20_00, outgo: 70_00, left: null },
+      { currency: "INR", income: 1_00_000_00, emis: 15_000_00, emisPaid: 10_000_00, emisOthers: 0, prepaid: 0, expenses: 2_124_17, outgo: 17_124_17, left: 82_875_83 },
+      { currency: "USD", income: null, emis: 50_00, emisPaid: 0, emisOthers: 0, prepaid: 0, expenses: 20_00, outgo: 70_00, left: null },
     ]);
   });
 
@@ -51,9 +51,19 @@ describe("summarizeBudget", () => {
     expect(row).toMatchObject({ emis: 7_000_00, emisPaid: 2_000_00, emisOthers: 1_000_00 });
   });
 
+  it("counts a prepayment as a payment made this month", () => {
+    const [row] = summarizeBudget({
+      income: { amount: 50_000_00, currency: "INR" },
+      dues: [due(5_000_00, "due")],
+      expenses: [],
+      prepaid: [{ date: "2026-10-15", currency: "INR", amount: 20_000_00 }],
+    });
+    expect(row).toMatchObject({ emis: 25_000_00, emisPaid: 20_000_00, prepaid: 20_000_00, outgo: 25_000_00, left: 25_000_00 });
+  });
+
   it("shows the income row even with nothing else", () => {
     expect(summarizeBudget({ income: { amount: 500_00, currency: "EUR" }, dues: [], expenses: [] })).toEqual([
-      { currency: "EUR", income: 500_00, emis: 0, emisPaid: 0, emisOthers: 0, expenses: 0, outgo: 0, left: 500_00 },
+      { currency: "EUR", income: 500_00, emis: 0, emisPaid: 0, emisOthers: 0, prepaid: 0, expenses: 0, outgo: 0, left: 500_00 },
     ]);
   });
 });
@@ -135,6 +145,12 @@ describe("projectCashflow / breathingRoomFrom", () => {
     expect(months.map((m) => m.left)).toEqual([18_000_00, 18_000_00, 18_000_00, 28_000_00, 28_000_00, 28_000_00]);
     expect(months[0]).toMatchObject({ month: "2026-10", emis: 30_000_00, expenses: 2_000_00, outgo: 32_000_00 });
     expect(endings).toEqual([{ loanId: "Phone", name: "Phone", month: "2026-12", frees: 10_000_00 }]); // Car runs past the window
+  });
+
+  it("counts prepayments in the month they are paid", () => {
+    const { months } = run({ prepaid: [{ date: "2026-11-20", currency: "INR", amount: 5_000_00 }, { date: "2030-01-01", currency: "INR", amount: 1 }] });
+    expect(months[1]!.emis).toBe(35_000_00);
+    expect(months.map((m) => m.emis).reduce((a, b) => a + b)).toBe(1_55_000_00); // 3 × 30,000 + 3 × 20,000 + the prepayment; the 2030 one is outside the window
   });
 
   it("uses only the user's share of split loans", () => {

@@ -16,6 +16,7 @@ import {
   type RateChangeMode,
   type ScheduleSummary,
 } from "@emi/core";
+import { applyRecordedPrepayments, PrepaymentDateError, type RecordedPrepayment } from "@emi/shared";
 import { toLoanTerms, type Card, type CardSnapshot, type Dashboard, type LenderSnapshot, type LoanAccess, type LoanShare, type Instalment, type LoanDetail, type LoanInput, type LoanListItem, type UpcomingItem } from "@emi/shared";
 import { ApiError, notFound } from "../lib/errors";
 import { chunk } from "../lib/util";
@@ -61,9 +62,10 @@ export async function regenerateSchedule(
   input: LoanInput,
   card: Card | null,
 ): Promise<ScheduleSummary> {
-  const [ov, rc] = await db.batch([
+  const [ov, rc, pp] = await db.batch([
     db.prepare("SELECT n, override_amount FROM instalments WHERE loan_id = ? AND user_id = ? AND override_amount IS NOT NULL").bind(loanId, userId),
     db.prepare("SELECT effective_date, annual_rate, mode FROM rate_changes WHERE loan_id = ? AND user_id = ?").bind(loanId, userId),
+    db.prepare(`${PREPAYMENT_SELECT} WHERE loan_id = ? AND user_id = ? ORDER BY paid_date, created_at`).bind(loanId, userId),
   ]);
   const overrides: Record<number, number> = {};
   for (const r of (ov!.results as Row[]) ?? []) {
@@ -76,7 +78,15 @@ export async function regenerateSchedule(
     mode: String(r.mode) as RateChangeMode,
   }));
 
-  const schedule = buildSchedule(toLoanTerms(input, { overrides, rateChanges }));
+  const recorded = ((pp!.results as Row[]) ?? []).map(prepaymentFromRow);
+  let schedule: ReturnType<typeof buildSchedule>;
+  let applied: ReturnType<typeof applyRecordedPrepayments>["applied"];
+  try {
+    ({ schedule, applied } = applyRecordedPrepayments(toLoanTerms(input, { overrides, rateChanges }), recorded));
+  } catch (e) {
+    if (e instanceof PrepaymentDateError) throw new ApiError(422, e.code);
+    throw e;
+  }
   const rule: PayableRule = {
     card: card ? { statementDay: card.statementDay, dueDay: card.dueDay, graceDays: card.graceDays } : null,
     holidayRule: input.holidayRule,
@@ -124,9 +134,40 @@ export async function regenerateSchedule(
     db.prepare("DELETE FROM payments WHERE loan_id = ? AND user_id = ? AND instalment_id IN (SELECT id FROM instalments WHERE loan_id = ? AND n > ?)").bind(loanId, userId, loanId, schedule.rows.length),
     db.prepare("DELETE FROM instalments WHERE loan_id = ? AND user_id = ? AND n > ?").bind(loanId, userId, schedule.rows.length),
     db.prepare("UPDATE loans SET summary = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ? AND user_id = ?").bind(JSON.stringify(schedule.summary), loanId, userId),
+    ...applied.map((a) =>
+      db.prepare("UPDATE prepayments SET applied_amount = ?, charges = ?, after_n = ? WHERE id = ? AND user_id = ?").bind(a.amount, a.charges, a.afterN, a.id, userId),
+    ),
   );
   await db.batch(statements);
   return schedule.summary;
+}
+
+const PREPAYMENT_SELECT = "SELECT * FROM prepayments";
+
+export function prepaymentFromRow(r: Row): RecordedPrepayment {
+  return {
+    id: String(r.id),
+    date: String(r.paid_date),
+    kind: String(r.kind) as RecordedPrepayment["kind"],
+    amount: r.amount === null || r.amount === undefined ? null : Number(r.amount),
+    mode: String(r.mode) as RecordedPrepayment["mode"],
+    charge: JSON.parse(String(r.charge ?? '{"kind":"none"}')),
+    chargeTaxRate: Number(r.charge_tax_rate ?? 0),
+    note: r.note === null || r.note === undefined ? null : String(r.note),
+    appliedAmount: Number(r.applied_amount ?? 0),
+    charges: Number(r.charges ?? 0),
+    afterN: Number(r.after_n ?? 0),
+  };
+}
+
+function prepaymentsByLoan(rows: Row[]): Map<string, RecordedPrepayment[]> {
+  const out = new Map<string, RecordedPrepayment[]>();
+  for (const r of rows) {
+    const id = String(r.loan_id);
+    if (!out.has(id)) out.set(id, []);
+    out.get(id)!.push(prepaymentFromRow(r));
+  }
+  return out;
 }
 
 const INSTALMENT_SELECT = `
@@ -171,9 +212,12 @@ export function instalmentFromRow(r: Row, ctx: StatusCtx): Instalment {
   };
 }
 
+/** Outstanding = financed − principal of paid instalments − principal prepaid (part-payments, foreclosure). */
 function progressFrom(instalments: Instalment[], summary: ScheduleSummary): LoanProgress {
   const p = loanProgress(instalments.map((i) => ({ ...i, paid: !!i.payment })));
-  return { ...p, principalOutstanding: summary.financedPrincipal - p.principalPaid };
+  const repaid = p.principalPaid + (summary.totalPrepaid ?? 0);
+  const financed = summary.financedPrincipal;
+  return { ...p, principalOutstanding: financed - repaid, progress: financed > 0 ? Math.min(1, repaid / financed) : 0 };
 }
 
 /** Who is looking at a loan. Data always lives under the owner's user_id. */
@@ -216,7 +260,7 @@ function shareFromRow(r: Row): LoanShare {
 export async function getLoanDetail(db: D1Database, ownerId: string, loanId: string, viewer?: Viewer): Promise<LoanDetail> {
   const v: Viewer = viewer ?? { userId: ownerId, role: "owner" };
   const isOwner = v.role === "owner";
-  const [loanRes, instRes, tzRes, rcRes, docRes, shareRes] = await db.batch([
+  const [loanRes, instRes, tzRes, rcRes, docRes, shareRes, ppRes] = await db.batch([
     db.prepare(`${LOAN_WITH_LENDER} WHERE l.id = ? AND l.user_id = ?`).bind(loanId, ownerId),
     db.prepare(`${INSTALMENT_SELECT} WHERE i.loan_id = ? AND i.user_id = ? ORDER BY i.n`).bind(loanId, ownerId),
     db.prepare(STATUS_CTX_SQL).bind(v.userId),
@@ -231,6 +275,7 @@ export async function getLoanDetail(db: D1Database, ownerId: string, loanId: str
          WHERE s.loan_id = ? AND s.owner_id = ? AND ? = 1 ORDER BY s.created_at`,
       )
       .bind(loanId, ownerId, isOwner ? 1 : 0),
+    db.prepare(`${PREPAYMENT_SELECT} WHERE loan_id = ? AND user_id = ? ORDER BY paid_date, created_at`).bind(loanId, ownerId),
   ]);
   const row = (loanRes!.results as Row[])[0];
   if (!row) throw notFound("loan_not_found");
@@ -247,6 +292,7 @@ export async function getLoanDetail(db: D1Database, ownerId: string, loanId: str
     access: v.role,
     lender: lenderSnapshot(row),
     card: isOwner ? cardSnapshot(row) : null,
+    prepayments: (ppRes!.results as Row[]).map(prepaymentFromRow),
     ownerName: isOwner ? null : (v.ownerName ?? null),
     rateChanges: (rcRes!.results as Row[]).map((r) => ({
       id: String(r.id),
@@ -265,7 +311,15 @@ export async function getLoanDetail(db: D1Database, ownerId: string, loanId: str
   };
 }
 
-function toListItems(loanRows: Row[], instRows: Row[], ctx: StatusCtx, role: (r: Row) => LoanAccess, isOwner: (r: Row) => boolean): LoanListItem[] {
+function toListItems(
+  loanRows: Row[],
+  instRows: Row[],
+  ppRows: Row[],
+  ctx: StatusCtx,
+  role: (r: Row) => LoanAccess,
+  isOwner: (r: Row) => boolean,
+): LoanListItem[] {
+  const prepaid = prepaymentsByLoan(ppRows);
   const byLoan = new Map<string, Instalment[]>();
   for (const r of instRows) {
     const i = instalmentFromRow(r, ctx);
@@ -284,6 +338,7 @@ function toListItems(loanRows: Row[], instRows: Row[], ctx: StatusCtx, role: (r:
       access: role(r),
       lender: lenderSnapshot(r),
       card: isOwner(r) ? cardSnapshot(r) : null,
+      prepayments: prepaid.get(loan.id) ?? [],
       ownerName: isOwner(r) ? null : r.owner_name ? String(r.owner_name) : null,
     };
   });
@@ -291,17 +346,25 @@ function toListItems(loanRows: Row[], instRows: Row[], ctx: StatusCtx, role: (r:
 
 /** The user's own loans. */
 export async function listLoans(db: D1Database, userId: string): Promise<LoanListItem[]> {
-  const [loanRes, instRes, tzRes] = await db.batch([
+  const [loanRes, instRes, tzRes, ppRes] = await db.batch([
     db.prepare(`${LOAN_WITH_LENDER} WHERE l.user_id = ? ORDER BY l.created_at DESC`).bind(userId),
     db.prepare(`${INSTALMENT_SELECT} WHERE i.user_id = ? ORDER BY i.loan_id, i.n`).bind(userId),
     db.prepare(STATUS_CTX_SQL).bind(userId),
+    db.prepare(`${PREPAYMENT_SELECT} WHERE user_id = ? ORDER BY paid_date, created_at`).bind(userId),
   ]);
-  return toListItems(loanRes!.results as Row[], instRes!.results as Row[], statusCtxFromRow((tzRes!.results as Row[])[0]), () => "owner", () => true);
+  return toListItems(
+    loanRes!.results as Row[],
+    instRes!.results as Row[],
+    ppRes!.results as Row[],
+    statusCtxFromRow((tzRes!.results as Row[])[0]),
+    () => "owner",
+    () => true,
+  );
 }
 
 /** Loans other people shared with the user — only those loans, nothing else of the owner's. */
 export async function listSharedLoans(db: D1Database, userId: string): Promise<LoanListItem[]> {
-  const [loanRes, instRes, tzRes] = await db.batch([
+  const [loanRes, instRes, tzRes, ppRes] = await db.batch([
     db
       .prepare(
         `SELECT l.*, ld.name AS lender_name, ld.color AS lender_color, ld.initial AS lender_initial, s.access AS share_access, u.name AS owner_name
@@ -319,10 +382,17 @@ export async function listSharedLoans(db: D1Database, userId: string): Promise<L
       )
       .bind(userId),
     db.prepare(STATUS_CTX_SQL).bind(userId),
+    db
+      .prepare(
+        `SELECT pp.* FROM prepayments pp JOIN loan_shares s ON s.loan_id = pp.loan_id AND s.owner_id = pp.user_id
+         WHERE s.user_id = ? ORDER BY pp.paid_date, pp.created_at`,
+      )
+      .bind(userId),
   ]);
   return toListItems(
     loanRes!.results as Row[],
     instRes!.results as Row[],
+    ppRes!.results as Row[],
     statusCtxFromRow((tzRes!.results as Row[])[0]),
     (r) => String(r.share_access) as LoanAccess,
     () => false,
@@ -371,9 +441,11 @@ export async function getDashboard(db: D1Database, userId: string): Promise<Dash
   const monthStart = today.slice(0, 8) + "01";
   const monthEnd = addDays(addMonthsClamped(monthStart, 1), -1);
   const horizon = addDays(today, 30);
-  const windowEnd = compareISO(horizon, monthEnd) > 0 ? horizon : monthEnd;
+  const nextMonthStart = addMonthsClamped(monthStart, 1, 1);
+  const nextMonthEnd = addDays(addMonthsClamped(monthStart, 2, 1), -1);
+  const windowEnd = compareISO(horizon, nextMonthEnd) > 0 ? horizon : nextMonthEnd;
 
-  const [dueRes, loanRes, paidRes, nextRes, trendRes, incomeRes] = await db.batch([
+  const [dueRes, loanRes, paidRes, nextRes, trendRes, incomeRes, prepaidRes] = await db.batch([
     db
       .prepare(
         `${INSTALMENT_SELECT.replace("SELECT i.*", "SELECT i.*, l.nickname AS loan_nickname, l.lender_id, l.card_id, l.currency")}
@@ -405,7 +477,23 @@ export async function getDashboard(db: D1Database, userId: string): Promise<Dash
       )
       .bind(userId, monthStart),
     db.prepare("SELECT monthly_income, income_currency FROM settings WHERE user_id = ?").bind(userId),
+    // Prepayments count as payments in the month they are paid (principal + charges).
+    db
+      .prepare(
+        `SELECT pp.paid_date, pp.applied_amount + pp.charges AS total, l.currency FROM prepayments pp
+         JOIN loans l ON l.id = pp.loan_id AND l.user_id = pp.user_id
+         WHERE pp.user_id = ? AND pp.paid_date BETWEEN ? AND ?`,
+      )
+      .bind(userId, monthStart, nextMonthEnd),
   ]);
+  const prepaid = (prepaidRes!.results as Row[]).map((r) => ({ date: String(r.paid_date), currency: String(r.currency), amount: Number(r.total) }));
+  const prepaidIn = (a: string, b: string) => prepaid.filter((p) => p.date >= a && p.date <= b && p.amount > 0);
+  const prepaidTotals = (a: string, b: string) => totalsByCurrency(prepaidIn(a, b), (p) => p.currency, (p) => p.amount);
+  const addTotals = (x: Record<string, number>, y: Record<string, number>) => {
+    const out = { ...x };
+    for (const [c, v] of Object.entries(y)) out[c] = (out[c] ?? 0) + v;
+    return out;
+  };
 
   const items = (dueRes!.results as Row[]).map((r) => toUpcoming(r, ctx));
   const unpaid = items.filter((i) => i.status !== "paid" && i.status !== "skipped");
@@ -421,7 +509,7 @@ export async function getDashboard(db: D1Database, userId: string): Promise<Dash
       lenderId: String(r.lender_id),
       type: String(r.type),
       currency: String(r.currency),
-      outstanding: summary.financedPrincipal - (principalPaid.get(String(r.id)) ?? 0),
+      outstanding: summary.financedPrincipal - (principalPaid.get(String(r.id)) ?? 0) - (summary.totalPrepaid ?? 0),
     };
   });
   const active = loans.filter((l) => l.outstanding > 0);
@@ -437,7 +525,8 @@ export async function getDashboard(db: D1Database, userId: string): Promise<Dash
     let obligations = 0;
     let excludedLoans = 0;
     for (const r of loanRows) {
-      const out = (JSON.parse(String(r.summary)) as ScheduleSummary).financedPrincipal - (principalPaid.get(String(r.id)) ?? 0);
+      const sum = JSON.parse(String(r.summary)) as ScheduleSummary;
+      const out = sum.financedPrincipal - (principalPaid.get(String(r.id)) ?? 0) - (sum.totalPrepaid ?? 0);
       if (out <= 0) continue;
       if (String(r.currency) !== currency) excludedLoans++;
       else obligations += regular.get(String(r.id)) ?? 0;
@@ -491,9 +580,13 @@ export async function getDashboard(db: D1Database, userId: string): Promise<Dash
 
   return {
     today,
-    payableThisMonth: totalsByCurrency(inMonth.filter((i) => i.status !== "skipped"), cur, amount),
+    payableThisMonth: addTotals(totalsByCurrency(inMonth.filter((i) => i.status !== "skipped"), cur, amount), prepaidTotals(monthStart, monthEnd)),
     stillToPayThisMonth: totalsByCurrency(inMonth.filter((i) => i.status !== "skipped" && i.status !== "paid"), cur, amount),
-    paidThisMonth: totalsByCurrency(inMonth.filter((i) => i.status === "paid"), cur, amount),
+    paidThisMonth: addTotals(totalsByCurrency(inMonth.filter((i) => i.status === "paid"), cur, amount), prepaidTotals(monthStart, monthEnd)),
+    payableNextMonth: addTotals(
+      totalsByCurrency(unpaid.filter((i) => i.payableDate >= nextMonthStart && i.payableDate <= nextMonthEnd), cur, amount),
+      prepaidTotals(nextMonthStart, nextMonthEnd),
+    ),
     next7Days: totalsByCurrency(unpaid.filter((i) => i.payableDate >= today && i.payableDate <= addDays(today, 7)), cur, amount),
     next30Days: totalsByCurrency(unpaid.filter((i) => i.payableDate >= today && i.payableDate <= horizon), cur, amount),
     overdue: totalsByCurrency(unpaid.filter((i) => i.status === "overdue"), cur, amount),

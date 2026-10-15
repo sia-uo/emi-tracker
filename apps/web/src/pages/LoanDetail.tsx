@@ -10,6 +10,7 @@ import { useDeleteLoan, useLenders, useLoan, useMuteLoan, useOverride, usePay, u
 import { BalanceChart, PrincipalInterestChart } from "../components/charts";
 import { Documents, ExportMenu, PrepaySimulator, RateChanges, SharingPanel } from "../components/LoanExtras";
 import { CardLine } from "./Loans";
+import { Prepayments } from "../components/Prepayments";
 import { Dialog, ErrorState, LenderAvatar, PageHeader, ProgressBar, Section, Spinner, StatusBadge, TextField, cx } from "../components/ui";
 
 function Stat({ label, value, strong, hint }: { label: string; value: string; strong?: boolean; hint?: string }) {
@@ -170,6 +171,9 @@ export function LoanDetail() {
   const showTax = s.totalInterestTax > 0;
   const showFees = loan.instalments.some((i) => i.fees > 0 || i.shiftCost > 0);
   const showPayable = loan.instalments.some((i) => i.payableDate !== i.billedDate);
+  // Recorded prepayments, by the instalment they follow (its closing balance already reflects them).
+  const prepaidAfter = new Map<number, number>();
+  for (const p of loan.prepayments) if (p.afterN > 0) prepaidAfter.set(p.afterN, (prepaidAfter.get(p.afterN) ?? 0) + p.appliedAmount);
 
   const onDelete = async () => {
     if (!confirm(t("loans.deleteConfirm"))) return;
@@ -326,7 +330,10 @@ export function LoanDetail() {
                     </td>
                   )}
                   <td className="num px-3 py-2 text-right font-semibold">{m(i.totalPayable)}</td>
-                  <td className="num px-3 py-2 text-right">{m(i.closing)}</td>
+                  <td className="num px-3 py-2 text-right">
+                    {m(i.closing)}
+                    {prepaidAfter.has(i.n) && <span className="block text-xs text-success">{t("schedule.prepaidAfter", { amount: m(prepaidAfter.get(i.n)!) })}</span>}
+                  </td>
                   <td className="px-3 py-2">
                     <StatusBadge status={i.status} />
                   </td>
@@ -354,6 +361,7 @@ export function LoanDetail() {
                     {i.interestTax > 0 && ` · ${taxName} ${m(i.interestTax)}`}
                     {i.fees + i.shiftCost > 0 && ` · ${t("schedule.fees")} ${m(i.fees + i.shiftCost)}`}
                   </p>
+                  {prepaidAfter.has(i.n) && <p className="mt-1 text-xs font-semibold text-success">{t("schedule.prepaidAfter", { amount: m(prepaidAfter.get(i.n)!) })}</p>}
                 </div>
                 <div className="text-right">
                   <p className="num font-bold">{m(i.totalPayable)}</p>
@@ -387,6 +395,9 @@ export function LoanDetail() {
         <div className="space-y-6">
           <ExportMenu loan={loan} lenderName={lender?.name ?? ""} />
           {isOwner && <Documents loan={loan} />}
+        </div>
+        <div className="lg:col-span-2">
+          <Prepayments loan={loan} />
         </div>
         <div className="lg:col-span-2">
           <RateChanges loan={loan} />

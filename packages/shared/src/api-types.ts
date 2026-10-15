@@ -104,6 +104,8 @@ export interface LoanListItem extends Loan {
   lender: LenderSnapshot | null;
   /** Owner only: the card a credit card EMI is billed to (null for other loans and for shared users). */
   card: CardSnapshot | null;
+  /** Prepayments and foreclosures recorded on the loan, oldest first. */
+  prepayments: RecordedPrepayment[];
   /** Owner's display name; set only for loans shared with the viewer. */
   ownerName: string | null;
 }
@@ -131,6 +133,25 @@ export interface LoanDocument {
   contentType: string;
   size: number;
   createdAt: string;
+}
+
+/** A prepayment or foreclosure the user recorded on a loan. */
+export interface RecordedPrepayment {
+  id: string;
+  date: string;
+  kind: "part" | "foreclosure";
+  /** What the user asked to prepay; null for a foreclosure. */
+  amount: number | null;
+  mode: "reduce_tenure" | "reduce_emi";
+  charge: { kind: "none" } | { kind: "flat"; amount: number } | { kind: "percent"; percent: number };
+  chargeTaxRate: number;
+  note: string | null;
+  /** Principal it actually paid off (from the schedule). */
+  appliedAmount: number;
+  /** Charge + tax on it. */
+  charges: number;
+  /** Applied right after this instalment. */
+  afterN: number;
 }
 
 export interface LoanDetail extends LoanListItem {
@@ -170,9 +191,14 @@ export interface PayByGroup {
 export interface Dashboard {
   today: string;
   payableThisMonth: MoneyByCurrency;
-  /** This month's instalments not paid yet (skipped excluded): payableThisMonth − paidThisMonth. */
+  /**
+   * This month's instalments not paid yet (skipped excluded). payableThisMonth and paidThisMonth
+   * also include prepayments made this month, so payable = paid + still to pay.
+   */
   stillToPayThisMonth: MoneyByCurrency;
   paidThisMonth: MoneyByCurrency;
+  /** Unpaid instalments payable next month, plus prepayments dated next month. */
+  payableNextMonth: MoneyByCurrency;
   next7Days: MoneyByCurrency;
   next30Days: MoneyByCurrency;
   overdue: MoneyByCurrency;

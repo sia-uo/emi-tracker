@@ -32,7 +32,7 @@ export function errorMessage(t: TFn, err: unknown): string {
   }
   // Engine errors raised in the browser (simulator) carry a code too.
   const code = (err as { code?: string } | null)?.code;
-  if (code) return t(`errors.schedule.${code}`, { defaultValue: t("errors.schedule.generic") });
+  if (code) return t(`errors.${code}`, { defaultValue: t(`errors.schedule.${code}`, { defaultValue: t("errors.schedule.generic") }) });
   return t("common.errorGeneric");
 }
 

@@ -60,13 +60,13 @@ accountRoutes.get("/account/deletion-impact", async (c) => {
 });
 
 /** Tables holding user data, children first (deletion order). */
-const USER_TABLES = ["expenses", "notifications", "push_subscriptions", "documents", "payments", "instalments", "rate_changes", "loans", "cards", "lenders", "settings"] as const;
+const USER_TABLES = ["expenses", "notifications", "push_subscriptions", "documents", "payments", "instalments", "rate_changes", "prepayments", "loans", "cards", "lenders", "settings"] as const;
 
 /** Full data export (JSON). Push endpoints are omitted (device secrets, not user data). */
 accountRoutes.get("/account/export", async (c) => {
   const userId = c.get("userId");
   const db = c.env.DB;
-  const tables = ["settings", "lenders", "cards", "loans", "instalments", "payments", "rate_changes", "documents", "notifications", "expenses"] as const;
+  const tables = ["settings", "lenders", "cards", "loans", "instalments", "payments", "rate_changes", "documents", "notifications", "expenses", "prepayments"] as const;
   const results = await db.batch([
     db.prepare("SELECT id, email, name, picture, created_at, last_login_at FROM users WHERE id = ?").bind(userId),
     ...tables.map((t) => db.prepare(`SELECT * FROM ${t} WHERE user_id = ?`).bind(userId)),

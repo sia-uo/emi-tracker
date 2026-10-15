@@ -14,6 +14,7 @@ import type {
   Me,
   PaymentInput,
   RateChangeInput,
+  RecordPrepaymentInput,
   LoanShare,
   DeletionImpact,
   ApiVersion,
@@ -62,6 +63,7 @@ function withLoanDefaults<T extends LoanListItem>(l: T): T {
     splits: l.splits ?? [],
     prepaymentCharge: l.prepaymentCharge ?? { kind: "none" },
     prepaymentChargeTaxRate: l.prepaymentChargeTaxRate ?? 0,
+    prepayments: l.prepayments ?? [],
   };
 }
 
@@ -174,6 +176,12 @@ export const useAddRateChange = () =>
   useLoanDetailMutation(({ loanId, input }: { loanId: string; input: RateChangeInput }) =>
     api<LoanDetail>(`/loans/${loanId}/rate-changes`, { method: "POST", body: input }),
   );
+export const useRecordPrepayment = () =>
+  useLoanDetailMutation(({ loanId, input }: { loanId: string; input: RecordPrepaymentInput }) =>
+    api<LoanDetail>(`/loans/${loanId}/prepayments`, { method: "POST", body: input }),
+  );
+export const useDeletePrepayment = () =>
+  useLoanDetailMutation(({ loanId, id }: { loanId: string; id: string }) => api<LoanDetail>(`/loans/${loanId}/prepayments/${id}`, { method: "DELETE" }));
 export const useDeleteRateChange = () =>
   useLoanDetailMutation(({ loanId, id }: { loanId: string; id: string }) => api<LoanDetail>(`/loans/${loanId}/rate-changes/${id}`, { method: "DELETE" }));
 

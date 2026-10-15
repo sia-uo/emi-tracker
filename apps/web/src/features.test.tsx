@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { addDays, addMonthsClamped, todayInZone } from "@emi/core";
@@ -295,5 +295,53 @@ describe("breathing room", () => {
     // A lower target means there is already enough left over.
     fireEvent.change(screen.getByLabelText(/Breathing room means at least/), { target: { value: "20000" } });
     expect(await screen.findByText(en.budget.breathing.already)).toBeInTheDocument();
+  });
+});
+
+describe("recording a prepayment", () => {
+  it("previews a foreclosure with the loan's saved charge and sends it", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const calls = mockApi({ ...base, "/loans/L9": fullLoan(), "/loans/L9/prepayments": fullLoan() });
+    renderAt("/loans/L9");
+    fireEvent.click(await screen.findByRole("button", { name: en.prepayments.foreclose }));
+    fireEvent.change(screen.getByLabelText(en.prepayments.date), { target: { value: "2025-02-20" } });
+    expect(await screen.findByText(/^Pay ₹[\d,.]+ to close the loan after EMI #1\.$/)).toBeInTheDocument();
+    expect(screen.getByText(/principal \+ ₹[\d,.]+ charges\./)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: en.prepayments.recordForeclosure }));
+    await vi.waitFor(() => expect(calls.some((c) => c.method === "POST")).toBe(true));
+    expect(calls.find((c) => c.method === "POST")!.body).toEqual({
+      date: "2025-02-20", kind: "foreclosure", amount: null, mode: "reduce_tenure",
+      charge: { kind: "percent", percent: 3 }, chargeTaxRate: 18,
+    });
+  });
+
+  it("explains when a date is outside the loan", async () => {
+    mockApi({ ...base, "/loans/L9": fullLoan() });
+    renderAt("/loans/L9");
+    const section = (await screen.findByRole("heading", { name: en.prepayments.title })).closest("section") as HTMLElement;
+    fireEvent.change(within(section).getByLabelText(new RegExp(en.prepay.amount)), { target: { value: "1000" } });
+    fireEvent.change(screen.getByLabelText(en.prepayments.date), { target: { value: "2025-01-20" } });
+    expect(await screen.findByText(en.errors.prepayment_before_first_emi)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: en.prepayments.record })).toBeDisabled();
+  });
+
+  it("lists recorded prepayments and marks them on the schedule", async () => {
+    const pp = { id: "pp1", date: "2025-02-20", kind: "part", amount: 10_000_00, mode: "reduce_tenure", charge: { kind: "none" }, chargeTaxRate: 0, note: null, appliedAmount: 10_000_00, charges: 0, afterN: 1 };
+    mockApi({ ...base, "/loans/L9": fullLoan({ prepayments: [pp] }) });
+    renderAt("/loans/L9");
+    expect(await screen.findByText("After EMI #1 · Reduce tenure (keep EMI)")).toBeInTheDocument();
+    expect(screen.getAllByText("−₹10,000.00 prepaid").length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("budget with prepayments", () => {
+  it("counts a prepayment made this month as a payment", async () => {
+    const today = todayInZone("Asia/Kolkata");
+    const pp = { id: "pp1", date: today, kind: "foreclosure", amount: null, mode: "reduce_tenure", charge: { kind: "none" }, chargeTaxRate: 0, note: null, appliedAmount: 25_000_00, charges: 1_000_00, afterN: 2 };
+    mockApi({ ...base, "/loans": [{ ...cardEmi, prepayments: [pp] }], "/instalments": [], "/expenses": [] });
+    renderAt("/budget");
+    expect(await screen.findByText("includes ₹26,000.00 prepaid")).toBeInTheDocument();
+    expect(screen.getByText("₹26,000.00 already paid")).toBeInTheDocument();
+    expect(screen.getByText(en.prepayments.foreclosure, { exact: false })).toBeInTheDocument();
   });
 });

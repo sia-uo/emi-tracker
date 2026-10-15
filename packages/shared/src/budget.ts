@@ -9,6 +9,13 @@ export function monthlyEquivalent(amount: Minor, frequency: ExpenseFrequency): M
   return frequency === "monthly" ? amount : roundMinor(amount / (frequency === "quarterly" ? 3 : 12));
 }
 
+/** A prepayment as a dated amount (principal + charges). */
+export interface PrepaidItem {
+  date: string;
+  currency: string;
+  amount: Minor;
+}
+
 export interface BudgetRow {
   currency: string;
   /** Monthly income, when it is set in this currency. */
@@ -19,6 +26,8 @@ export interface BudgetRow {
   emisPaid: Minor;
   /** Paid by the other people on split loans (not counted in `emis`). */
   emisOthers: Minor;
+  /** Prepayments / foreclosures made this month (principal + charges), included in `emis` and `emisPaid`. */
+  prepaid: Minor;
   /** Active fixed expenses, monthly equivalent. */
   expenses: Minor;
   outgo: Minor;
@@ -36,11 +45,13 @@ export function summarizeBudget(opts: {
   income: { amount: Minor; currency: string } | null;
   /** Splits per loan id; only the user's share of a split loan counts towards the budget. */
   splits?: Readonly<Record<string, readonly LoanSplit[]>>;
+  /** Prepayments made in the month (counted as payments, entirely the user's). */
+  prepaid?: readonly PrepaidItem[];
 }): BudgetRow[] {
   const rows = new Map<string, BudgetRow>();
   const row = (currency: string) => {
     let r = rows.get(currency);
-    if (!r) rows.set(currency, (r = { currency, income: null, emis: 0, emisPaid: 0, emisOthers: 0, expenses: 0, outgo: 0, left: null }));
+    if (!r) rows.set(currency, (r = { currency, income: null, emis: 0, emisPaid: 0, emisOthers: 0, prepaid: 0, expenses: 0, outgo: 0, left: null }));
     return r;
   };
   if (opts.income) row(opts.income.currency).income = opts.income.amount;
@@ -51,6 +62,12 @@ export function summarizeBudget(opts: {
     r.emis += mine;
     r.emisOthers += othersTotal;
     if (d.status === "paid") r.emisPaid += mine;
+  }
+  for (const p of opts.prepaid ?? []) {
+    const r = row(p.currency);
+    r.emis += p.amount;
+    r.emisPaid += p.amount;
+    r.prepaid += p.amount;
   }
   for (const e of opts.expenses) if (e.active) row(e.currency).expenses += monthlyEquivalent(e.amount, e.frequency);
   for (const r of rows.values()) {
@@ -98,6 +115,8 @@ export function projectCashflow(opts: {
   dues: readonly UpcomingItem[];
   expenses: readonly Expense[];
   splits?: Readonly<Record<string, readonly LoanSplit[]>>;
+  /** Prepayments count in the month they are paid. */
+  prepaid?: readonly PrepaidItem[];
 }): { months: CashflowMonth[]; endings: LoanEnding[] } {
   const expenses = opts.expenses
     .filter((e) => e.active && e.currency === opts.currency)
@@ -117,6 +136,12 @@ export function projectCashflow(opts: {
     const l = loans.get(d.loanId);
     if (!l) loans.set(d.loanId, { name: d.loanNickname, last: month, first: mine });
     else if (month > l.last) l.last = month;
+  }
+
+  for (const p of opts.prepaid ?? []) {
+    const month = p.date.slice(0, 7);
+    if (p.currency !== opts.currency || month < opts.startMonth || month > last) continue;
+    emis.set(month, (emis.get(month) ?? 0) + p.amount);
   }
 
   const months = list.map((month) => {

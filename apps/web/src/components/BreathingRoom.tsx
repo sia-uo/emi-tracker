@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { CalendarCheck, Info, PartyPopper, TrendingUp } from "lucide-react";
 import { addMonthsClamped, daysInMonth, parseISODate, parseMajor, roundMinor, toMajorString } from "@emi/core";
-import { breathingRoomFrom, projectCashflow, type Expense, type LoanSplit } from "@emi/shared";
+import { breathingRoomFrom, projectCashflow, type Expense, type LoanSplit, type PrepaidItem } from "@emi/shared";
 import { useFormat } from "../lib/format";
 import { useInstalments } from "../lib/queries";
 import { CashflowChart } from "./charts";
@@ -36,10 +36,13 @@ export function BreathingRoom({
   income,
   expenses,
   splits,
+  prepaid,
 }: {
   income: { amount: number; currency: string } | null;
   expenses: readonly Expense[];
   splits: Readonly<Record<string, readonly LoanSplit[]>>;
+  /** Recorded prepayments (principal + charges), counted in the month they were paid. */
+  prepaid: readonly PrepaidItem[];
 }) {
   const { t } = useTranslation();
   const f = useFormat();
@@ -61,9 +64,9 @@ export function BreathingRoom({
   const projection = useMemo(
     () =>
       income && dues.data
-        ? projectCashflow({ currency, income: income.amount, startMonth: start.slice(0, 7), months: HORIZON_MONTHS, dues: dues.data, expenses, splits })
+        ? projectCashflow({ currency, income: income.amount, startMonth: start.slice(0, 7), months: HORIZON_MONTHS, dues: dues.data, expenses, splits, prepaid })
         : null,
-    [income, dues.data, currency, start, expenses, splits],
+    [income, dues.data, currency, start, expenses, splits, prepaid],
   );
 
   if (!income) {

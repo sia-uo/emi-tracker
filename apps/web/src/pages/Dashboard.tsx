@@ -237,7 +237,8 @@ export function Dashboard() {
         {/* Older cached dashboards (offline) don't have the paid / still-to-pay split. */}
         <StillToPayTile still={d.stillToPayThisMonth ?? d.payableThisMonth} paid={d.paidThisMonth ?? {}} total={d.payableThisMonth} index={1} />
         <Tile label={t("dashboard.next7")} totals={d.next7Days} index={2} />
-        <Tile label={t("dashboard.next30")} totals={d.next30Days} index={3} />
+        {/* Older cached dashboards (offline) have no next-month figure. */}
+        <Tile label={t("dashboard.payableNextMonth")} totals={d.payableNextMonth ?? {}} index={3} />
         <Tile label={t("dashboard.overdue")} totals={d.overdue} tone="warn" icon={<AlertTriangle size={16} aria-hidden />} index={4} />
         <Tile label={t("dashboard.outstanding")} totals={d.outstanding} index={5} />
       </div>

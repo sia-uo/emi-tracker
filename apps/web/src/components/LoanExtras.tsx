@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { CalendarPlus, Download, FileDown, FileSpreadsheet, FileText, Info, Paperclip, Send, Trash2, TrendingUp, UserRound, Wallet } from "lucide-react";
 import { parseMajor, simulatePrepayment, toMajorString, type PrepaymentResult } from "@emi/core";
-import { DOCUMENT_TYPES, duesToIcs, scheduleToCsv, toLoanTerms, type LoanDetail, type UpcomingItem } from "@emi/shared";
+import { DOCUMENT_TYPES, duesToIcs, placeRecordedPrepayments, scheduleToCsv, toLoanTerms, type LoanDetail, type UpcomingItem } from "@emi/shared";
 import { HttpError, errorMessage } from "../lib/api";
 import { downloadBlob, slug } from "../lib/download";
 import { useFormat } from "../lib/format";
@@ -10,11 +10,21 @@ import { exportSchedulePdf } from "../lib/pdf";
 import { useAddRateChange, useChangeShare, useDeleteDocument, useDeleteRateChange, useInvite, useMe, useRevokeShare, useUploadDocument } from "../lib/queries";
 import { Section, SelectField, TextField, cx } from "./ui";
 
-/** Engine terms for a saved loan, including its manual overrides and rate changes. */
-export function termsForLoan(loan: LoanDetail) {
+/** Engine terms for a saved loan as stored: manual overrides and rate changes, without recorded prepayments. */
+export function baseTermsForLoan(loan: LoanDetail) {
   const overrides: Record<number, number> = {};
   for (const i of loan.instalments) if (i.overridden) overrides[i.n] = i.emi;
   return toLoanTerms(loan, { overrides, rateChanges: loan.rateChanges });
+}
+
+/** Engine terms for a saved loan including the prepayments the user recorded (what the schedule shows). */
+export function termsForLoan(loan: LoanDetail) {
+  const base = baseTermsForLoan(loan);
+  try {
+    return { ...base, prepayments: placeRecordedPrepayments(base, loan.prepayments).map((x) => x.p) };
+  } catch {
+    return base;
+  }
 }
 
 export function toUpcomingItems(loan: LoanDetail): UpcomingItem[] {

@@ -9,6 +9,7 @@ import {
   EXPENSE_FREQUENCIES,
   expenseInputSchema,
   monthlyEquivalent,
+  prepaymentTotal,
   splitAmount,
   summarizeBudget,
   type BudgetRow,
@@ -142,6 +143,7 @@ function Summary({ row }: { row: BudgetRow }) {
           <dd className="num text-lg font-bold">{m(row.emis)}</dd>
           {row.emisPaid > 0 && <dd className="text-xs text-success">{t("budget.emisPaid", { amount: m(row.emisPaid) })}</dd>}
           {row.emisOthers > 0 && <dd className="text-xs text-muted">{t("budget.emisOthers", { amount: m(row.emisOthers) })}</dd>}
+          {row.prepaid > 0 && <dd className="text-xs text-muted">{t("budget.includesPrepaid", { amount: m(row.prepaid) })}</dd>}
         </div>
         <div>
           <dt className="flex items-center gap-1.5 text-xs text-muted">
@@ -190,9 +192,19 @@ export function Budget() {
   );
   // Only the user's share of split loans counts towards their budget.
   const splits = useMemo(() => Object.fromEntries((loans.data ?? []).filter((l) => l.splits.length).map((l) => [l.id, l.splits])), [loans.data]);
+  // Prepayments count as payments in the month they were made.
+  const prepaidAll = useMemo(
+    () =>
+      (loans.data ?? []).flatMap((l) =>
+        l.prepayments.filter((p) => p.appliedAmount + p.charges > 0).map((p) => ({ loanId: l.id, loanNickname: l.nickname, kind: p.kind, date: p.date, currency: l.currency, amount: prepaymentTotal(p) })),
+      ),
+    [loans.data],
+  );
+  const monthEnd = `${month.slice(0, 8)}${String(daysInMonth(y, m)).padStart(2, "0")}`;
+  const prepaidThisMonth = useMemo(() => prepaidAll.filter((p) => p.date >= month && p.date <= monthEnd), [prepaidAll, month, monthEnd]);
   const rows = useMemo(
-    () => summarizeBudget({ expenses: expenses.data ?? [], dues: dues.data ?? [], income, splits }),
-    [expenses.data, dues.data, income, splits],
+    () => summarizeBudget({ expenses: expenses.data ?? [], dues: dues.data ?? [], income, splits, prepaid: prepaidThisMonth }),
+    [expenses.data, dues.data, income, splits, prepaidThisMonth],
   );
   const byCategory = useMemo(() => {
     const groups = new Map<ExpenseCategory, Expense[]>();
@@ -269,7 +281,7 @@ export function Budget() {
       </div>
 
       <div className="mt-6">
-        <BreathingRoom income={income} expenses={expenses.data ?? NO_EXPENSES} splits={splits} />
+        <BreathingRoom income={income} expenses={expenses.data ?? NO_EXPENSES} splits={splits} prepaid={prepaidAll} />
       </div>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-2">
@@ -330,10 +342,24 @@ export function Budget() {
         </Section>
 
         <Section title={t("budget.emiList")}>
-          {dueList.length === 0 ? (
+          {dueList.length === 0 && prepaidThisMonth.length === 0 ? (
             <p className="text-sm text-muted">{t("budget.noEmis")}</p>
           ) : (
             <ul className="divide-y divide-line">
+              {prepaidThisMonth.map((p) => (
+                <li key={`pp-${p.loanId}-${p.date}`} className="flex items-center gap-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <Link to={`/loans/${p.loanId}`} className="block truncate font-medium hover:underline">
+                      {p.loanNickname}
+                    </Link>
+                    <p className="text-xs text-muted">
+                      {p.kind === "foreclosure" ? t("prepayments.foreclosure") : t("prepayments.part")} · {f.date(p.date)}
+                    </p>
+                  </div>
+                  <StatusBadge status="paid" />
+                  <p className="num w-32 text-right text-sm font-semibold">{f.money(p.amount, p.currency)}</p>
+                </li>
+              ))}
               {dueList.map((d) => (
                 <li key={d.instalmentId} className="flex items-center gap-3 py-2">
                   <div className="min-w-0 flex-1">

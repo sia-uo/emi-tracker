@@ -180,6 +180,23 @@ export const prepaymentInputSchema = z.object({
 });
 export type PrepaymentInput = z.infer<typeof prepaymentInputSchema>;
 
+/** A prepayment or foreclosure the user actually made (changes the stored schedule). */
+export const recordPrepaymentSchema = z
+  .object({
+    date: isoDate,
+    kind: z.enum(["part", "foreclosure"]),
+    /** Principal prepaid (part-payments only; a foreclosure pays whatever is outstanding). */
+    amount: minor.positive().max(1e14).nullable().optional(),
+    mode: z.enum(["reduce_tenure", "reduce_emi"]).default("reduce_tenure"),
+    charge: feeSchema.default({ kind: "none" }),
+    chargeTaxRate: percent.default(0),
+    note: shortText(200).optional(),
+  })
+  .superRefine((p, ctx) => {
+    if (p.kind === "part" && !p.amount) ctx.addIssue({ code: "custom", path: ["amount"], message: "required" });
+  });
+export type RecordPrepaymentInput = z.infer<typeof recordPrepaymentSchema>;
+
 export const shareInputSchema = z.object({
   email: z.string().trim().toLowerCase().email().max(320),
   access: z.enum(["view", "edit"]),

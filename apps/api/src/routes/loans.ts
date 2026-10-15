@@ -8,6 +8,7 @@ import {
   overrideSchema,
   paymentInputSchema,
   rateChangeInputSchema,
+  recordPrepaymentSchema,
   shareAccessSchema,
   shareInputSchema,
   type LoanInput,
@@ -136,7 +137,7 @@ loanRoutes.delete("/:id", async (c) => {
   if (docs.results.length) await c.env.DOCS.delete(docs.results.map((d) => String(d.r2_key)));
   await c.env.DB.batch([
     c.env.DB.prepare("DELETE FROM loan_shares WHERE loan_id = ? AND owner_id = ?").bind(id, owner),
-    ...["payments", "instalments", "rate_changes", "documents", "notifications"].map((t) =>
+    ...["payments", "instalments", "rate_changes", "prepayments", "documents", "notifications"].map((t) =>
       c.env.DB.prepare(`DELETE FROM ${t} WHERE loan_id = ? AND user_id = ?`).bind(id, owner),
     ),
     c.env.DB.prepare("DELETE FROM loans WHERE id = ? AND user_id = ?").bind(id, owner),
@@ -188,6 +189,50 @@ loanRoutes.post("/:id/rate-changes", async (c) => {
     throw err;
   }
   return c.json(await detail(c, ctx, id), 201);
+});
+
+// ---- Recorded prepayments / foreclosures (change the stored schedule) -----------------------
+
+loanRoutes.post("/:id/prepayments", async (c) => {
+  const id = c.req.param("id");
+  const ctx = await accessFor(c.env.DB, c.get("userId"), id, "edit");
+  const row = ctx.loan;
+  const p = recordPrepaymentSchema.parse(await c.req.json());
+  if (String(row.repayment_type) !== "reducing") throw new ApiError(422, "prepayment_reducing_only");
+  const ppId = newId();
+  const db = c.env.DB;
+  await db
+    .prepare(
+      "INSERT INTO prepayments (id, user_id, loan_id, paid_date, kind, amount, mode, charge, charge_tax_rate, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(ppId, ctx.ownerId, id, p.date, p.kind, p.kind === "part" ? p.amount! : null, p.mode, JSON.stringify(p.charge), p.charge.kind === "none" ? 0 : p.chargeTaxRate, p.note ?? null)
+    .run();
+  const undo = async () => {
+    await db.prepare("DELETE FROM prepayments WHERE id = ? AND user_id = ?").bind(ppId, ctx.ownerId).run();
+    await regenerateFromRow(db, ctx.ownerId, row);
+  };
+  try {
+    await regenerateFromRow(db, ctx.ownerId, row);
+  } catch (err) {
+    await db.prepare("DELETE FROM prepayments WHERE id = ? AND user_id = ?").bind(ppId, ctx.ownerId).run();
+    throw err;
+  }
+  // Nothing left to prepay by then (e.g. an earlier foreclosure already closed the loan).
+  const applied = await db.prepare("SELECT applied_amount FROM prepayments WHERE id = ?").bind(ppId).first<{ applied_amount: number }>();
+  if (!applied || Number(applied.applied_amount) <= 0) {
+    await undo();
+    throw new ApiError(422, "prepayment_after_loan_end");
+  }
+  return c.json(await detail(c, ctx, id), 201);
+});
+
+loanRoutes.delete("/:id/prepayments/:ppId", async (c) => {
+  const id = c.req.param("id");
+  const ctx = await accessFor(c.env.DB, c.get("userId"), id, "edit");
+  const res = await c.env.DB.prepare("DELETE FROM prepayments WHERE id = ? AND loan_id = ? AND user_id = ?").bind(c.req.param("ppId"), id, ctx.ownerId).run();
+  if (!res.meta.changes) throw notFound("prepayment_not_found");
+  await regenerateFromRow(c.env.DB, ctx.ownerId, ctx.loan);
+  return c.json(await detail(c, ctx, id));
 });
 
 loanRoutes.delete("/:id/rate-changes/:rcId", async (c) => {

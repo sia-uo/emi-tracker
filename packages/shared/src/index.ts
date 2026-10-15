@@ -7,3 +7,4 @@ export * from "./format";
 export * from "./export";
 export * from "./budget";
 export * from "./split";
+export * from "./prepayments";

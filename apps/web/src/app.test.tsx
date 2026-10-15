@@ -27,6 +27,7 @@ const dashboard: Dashboard = {
   payableThisMonth: { INR: 1_23_456_78, USD: 100_00 },
   stillToPayThisMonth: { INR: 1_00_000_00, USD: 100_00 },
   paidThisMonth: { INR: 23_456_78 },
+  payableNextMonth: { INR: 61_000_00 },
   next7Days: { INR: 50_000_00 },
   next30Days: { INR: 75_000_00, USD: 100_00 },
   overdue: {},
@@ -91,6 +92,9 @@ describe("app shell", () => {
     const tile = screen.getByText(en.dashboard.payableThisMonth).closest("div.card") as HTMLElement;
     expect(within(tile).getByText("₹1,23,456.78")).toBeInTheDocument();
     expect(within(tile).getByText("$100.00")).toBeInTheDocument();
+    const next = screen.getByText(en.dashboard.payableNextMonth).closest("div.card") as HTMLElement;
+    expect(within(next).getByText("₹61,000.00")).toBeInTheDocument();
+    expect(screen.queryByText(en.dashboard.next30)).not.toBeInTheDocument();
     const still = screen.getByText(en.dashboard.stillToPay).closest("div.card") as HTMLElement;
     expect(within(still).getByText("₹1,00,000.00")).toBeInTheDocument();
     expect(within(still).getByText("₹23,456.78 of ₹1,23,456.78 paid")).toBeInTheDocument();
